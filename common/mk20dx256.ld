@@ -1,97 +1,116 @@
-/*
- * First off, let's define the regions for flash and RAM.
- * The teensy 3.1/3.2 uses a MK20DX256VLH7 with 256K flash starting at 0
+/* Teensyduino Core Library
+ * http://www.pjrc.com/teensy/
+ * Copyright (c) 2017 PJRC.COM, LLC.
  *
- * The RAM is split into two halfes called SRAM_L and SRAM_U.
- * SRAM_L ends at 0x1fff ffff and SRAM_U starts with 0x2000 0000
- * for most purposes, both blocks can be used as one. However, when in
- * VLLS2 power mode, only SRAM_U is powered.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * For the 64K of RAM in the MK20DX256VLH7, this translates to a
- * start address of 0x1fff8000
+ * 1. The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * 2. If the Software is incorporated into a build system that allows
+ * selection among a list of target devices, then similar target
+ * devices manufactured by PJRC.COM must be included in the list of
+ * target devices and selectable in the same manner.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 MEMORY
 {
-  FLASH (rx)  : ORIGIN = 0x00000000, LENGTH = 256K
-  RAM   (rwx) : ORIGIN = 0x1FFF8000, LENGTH =  64K
+	FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 256K
+	RAM  (rwx) : ORIGIN = 0x1FFF8000, LENGTH = 64K
 }
+
+ENTRY(_VectorsFlash)
 
 SECTIONS
 {
-  .text : {
-    /* The .text section is placed at the start in flash, which starts at address 0 */
-    . = 0;
+	.text : {
+		. = 0;
+		KEEP(*(.vectors))
+		*(.startup*)
+		/* TODO: does linker detect startup overflow onto flashconfig? */
+		. = 0x400;
+		KEEP(*(.flashconfig*))
+		*(.text*)
+		*(.rodata*)
+		. = ALIGN(4);
+		KEEP(*(.init))
+		. = ALIGN(4);
+		__preinit_array_start = .;
+		KEEP (*(.preinit_array))
+		__preinit_array_end = .;
+		__init_array_start = .;
+		KEEP (*(SORT(.init_array.*)))
+		KEEP (*(.init_array))
+		__init_array_end = .;
+	} > FLASH = 0xFF
 
-    /* First up is the interrupt vectors. The first two entries are even more special,
-     * as they old the initial stack pointer and the initial program counter.
-     * Mark this section KEEP to prevent it being garbage collected.
-     * The syntax *(.foo) means take the .foo sections from all files (*). */
-    KEEP(*(.vectors))
+	.ARM.exidx : {
+		__exidx_start = .;
+		*(.ARM.exidx* .gnu.linkonce.armexidx.*)
+		__exidx_end = .;
+	} > FLASH
+	_etext = .;
 
-    /* We have some space between the end of the vectors and the flash config,
-     * so let's squeeze in some startup code. If it gets too long, we'll have
-     * to put it elsewhere. */
-    *(.startup*)
+	.usbdescriptortable (NOLOAD) : {
+		/* . = ORIGIN(RAM); */
+		. = ALIGN(512);
+		*(.usbdescriptortable*)
+	} > RAM
 
-    /* The flashconfig has to appear at 0x400, so we'll move there by explicitly
-     * assigning the location counter (.). Since the location counter can only
-     * move forward, this also serves as a protection from .startup spilling over
-     * into .flashconfig. 
-     *
-     * WARNING: Be very careful with the flashconfig, as wrong values can lead
-     * to various degrees of bricking your teensy */
-    . = 0x400;
-    KEEP(*(.flashconfig*))
+	.dmabuffers (NOLOAD) : {
+		. = ALIGN(4);
+		*(.dmabuffers*)
+	} > RAM
 
-    /* Now let's load all the code */
-    *(.text*)
+	.usbbuffers (NOLOAD) : {
+		. = ALIGN(4);
+		*(.usbbuffers*)
+	} > RAM
 
-    /* And read-only data */
-    *(.rodata*)
-  } > FLASH = 0xFF
+	.data : AT (_etext) {
+		. = ALIGN(4);
+		_sdata = .; 
+		*(.fastrun*)
+		*(.data*)
+		. = ALIGN(4);
+		_edata = .; 
+	} > RAM
 
-  /* This is the end of the data that will remain in flash. We need to
-   * keep this for later for any sections that are loaded in flash but
-   * need to be relocated to RAM */
-  . = ALIGN(4);
-  _etext = .;
+	.noinit (NOLOAD) : {
+		*(.noinit*)
+	} > RAM
 
+	.bss : {
+		. = ALIGN(4);
+		_sbss = .;
+		__bss_start__ = .;
+		*(.bss*)
+		*(COMMON)
+		. = ALIGN(4);
+		_ebss = .;
+		__bss_end = .;
+		__bss_end__ = .;
+	} > RAM
 
-  /* Data contains all the (mutable) variables with predefined data.
-   * Therefore, we need to put it in flash but the code should refer
-   * to addresses in RAM.
-   * AT (_etext) places the "payload" after everything we put in flash
-   * so far, but > RAM puts this section in RAM for linking.
-   *
-   * This means that early during the boot, we have to copy this from
-   * flash to ram at the provided locations. We therefore need to 
-   * save the start and end (_sdata, _edata) for the memcopy. 
-   *
-   * We also align start and end to 4 byte = 32bit boundaries so we can
-   * simply copy whole registers/int32 instead of byte per byte */
-  .data : AT (_etext) {
-    . = ALIGN(4);
-    _sdata = .; 
-    *(.data*)
-    . = ALIGN(4);
-    _edata = .; 
-  } > RAM
-
-  /* The .bss section needs to be zeroed out, so it's similar to
-   * .data in that we need to remember start and end and make it easy
-   * to zero in int32 sizes instead of byte per byte. We however
-   * don't need to put this in flash */
-  .bss : {
-    . = ALIGN(4);
-    _sbss = .;
-    *(.bss*)
-    *(COMMON)
-    . = ALIGN(4);
-    _ebss = .;
-  } > RAM
-
-  /* Create a symbol for the end of the RAM as we will put the stack there */
-  _eram = ORIGIN(RAM) + LENGTH(RAM);
+	_eram = ORIGIN(RAM) + LENGTH(RAM);
+	_teensy_model_identifier = 0x21;
 }
+
+
+
 
